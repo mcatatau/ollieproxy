@@ -30,6 +30,16 @@ export async function chatRoutes(app: FastifyInstance) {
     const body = parseResult.data;
     const isStream = body.stream;
 
+    if (body.n !== undefined && body.n > 1) {
+      return reply.status(400).send({
+        error: {
+          message: 'n > 1 is not supported by this proxy',
+          type: 'invalid_request_error',
+          code: 400,
+        },
+      });
+    }
+
     // Thinking level: explicit `reasoning_effort` in the body wins; otherwise it
     // is derived from the model-name suffix (e.g. `claude-fable-5-max` -> max).
     const { baseModel, thinking: suffixThinking } = parseModel(body.model);
@@ -60,14 +70,24 @@ export async function chatRoutes(app: FastifyInstance) {
     if (body.frequency_penalty !== undefined) upstreamBody.frequency_penalty = body.frequency_penalty;
 
     let upstreamResponse: Response;
+    const ac = new AbortController();
+    const onAbort = () => ac.abort();
+    reply.raw.on('close', onAbort);
+    const timeout = AbortSignal.timeout(config.upstreamTimeoutMs);
+    // Combine client-disconnect and timeout aborts.
+    const race = AbortSignal.any?.([ac.signal, timeout]) ?? timeout;
     try {
       upstreamResponse = await fetch(CHAT_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(upstreamBody),
-        signal: AbortSignal.timeout(120_000),
+        signal: race,
       });
     } catch (err: unknown) {
+      if (ac.signal.aborted) {
+        // Client already gone; nothing more to send.
+        return reply;
+      }
       const msg = err instanceof Error ? err.message : String(err);
       return reply.status(502).send({
         error: {
@@ -76,12 +96,16 @@ export async function chatRoutes(app: FastifyInstance) {
           code: 502,
         },
       });
+    } finally {
+      reply.raw.off('close', onAbort);
     }
 
     let errorBody: string | null = null;
     if (!upstreamResponse.ok) {
       try {
-        errorBody = await upstreamResponse.text();
+        // Cap the error body so a huge upstream error page cannot exhaust
+        // memory. 8 KiB is plenty to surface a useful diagnostic.
+        errorBody = await readLimited(upstreamResponse, 8 * 1024);
       } catch {
         errorBody = 'Unknown upstream error';
       }
@@ -95,10 +119,10 @@ export async function chatRoutes(app: FastifyInstance) {
     }
 
     if (isStream) {
-      return handleStreaming(upstreamResponse, reply, body.stream_options?.include_usage);
+      return handleStreaming(upstreamResponse, reply, body.stream_options?.include_usage, ac.signal);
     }
 
-    return handleNonStreaming(upstreamResponse, reply);
+    return handleNonStreaming(upstreamResponse, reply, ac.signal);
   });
 }
 
@@ -106,6 +130,7 @@ async function handleStreaming(
   upstreamResponse: Response,
   reply: FastifyReply,
   includeUsage?: boolean,
+  abortSignal?: AbortSignal,
 ) {
   const raw = reply.raw;
   raw.writeHead(200, {
@@ -115,13 +140,21 @@ async function handleStreaming(
     'X-Accel-Buffering': 'no',
   });
 
-  const reader = upstreamResponse.body!.getReader();
+  const reader = upstreamResponse.body?.getReader();
+  if (!reader) {
+    raw.writeHead(502, { 'Content-Type': 'application/json' });
+    raw.end(JSON.stringify({
+      error: { message: 'Upstream returned no body', type: 'upstream_error', code: 502 },
+    }));
+    return;
+  }
   const decoder = new TextDecoder();
   const transformer = new StreamTransformer();
   let buffer = '';
 
   try {
     while (true) {
+      if (abortSignal?.aborted) break;
       const { value, done } = await reader.read();
       if (done) break;
 
@@ -161,17 +194,34 @@ async function handleStreaming(
       }
     }
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    raw.write(`data: ${JSON.stringify({
-      error: { message: `Stream error: ${msg}`, type: 'stream_error' },
-    })}\n\n`);
+    if (abortSignal?.aborted) {
+      // Client disconnected; suppress the error and stop the stream.
+    } else {
+      const msg = err instanceof Error ? err.message : String(err);
+      raw.write(`data: ${JSON.stringify({
+        error: { message: `Stream error: ${msg}`, type: 'stream_error' },
+      })}\n\n`);
+    }
   } finally {
+    if (abortSignal?.aborted) {
+      // Stop draining the upstream so it can be released promptly.
+      try { await reader.cancel(); } catch { /* ignore */ }
+    }
     try { raw.end(); } catch { /* ignore */ }
   }
 }
 
-async function handleNonStreaming(upstreamResponse: Response, reply: FastifyReply) {
-  const reader = upstreamResponse.body!.getReader();
+async function handleNonStreaming(
+  upstreamResponse: Response,
+  reply: FastifyReply,
+  abortSignal?: AbortSignal,
+) {
+  const reader = upstreamResponse.body?.getReader();
+  if (!reader) {
+    return reply.status(502).send({
+      error: { message: 'Upstream returned no body', type: 'upstream_error', code: 502 },
+    });
+  }
   const decoder = new TextDecoder();
   const transformer = new StreamTransformer();
   let buffer = '';
@@ -187,6 +237,7 @@ async function handleNonStreaming(upstreamResponse: Response, reply: FastifyRepl
 
   try {
     while (true) {
+      if (abortSignal?.aborted) break;
       const { value, done } = await reader.read();
       if (done) break;
 
@@ -240,6 +291,12 @@ async function handleNonStreaming(upstreamResponse: Response, reply: FastifyRepl
       }
     }
   } catch (err: unknown) {
+    if (abortSignal?.aborted) {
+      // Client disconnected; abort the upstream read rather than returning a
+      // partial 200 response that the client will never see.
+      try { await reader.cancel(); } catch { /* ignore */ }
+      return reply;
+    }
     const msg = err instanceof Error ? err.message : String(err);
     return reply.status(502).send({
       error: { message: `Upstream stream error: ${msg}`, type: 'upstream_error', code: 502 },
@@ -288,4 +345,29 @@ function randomId(): string {
   return Array.from({ length: 32 }, () =>
     Math.floor(Math.random() * 16).toString(16),
   ).join('');
+}
+
+/**
+ * Reads at most `limit` bytes from a Response body, decoding as UTF-8. Useful
+ * for surfacing upstream error bodies without trusting them to be small.
+ */
+async function readLimited(response: Response, limit: number): Promise<string> {
+  const body = response.body;
+  if (!body) return '';
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let out = '';
+  let read = 0;
+  try {
+    while (read < limit) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      read += value.byteLength;
+      out += decoder.decode(value, { stream: true });
+    }
+    out += decoder.decode();
+  } finally {
+    try { await reader.cancel(); } catch { /* ignore */ }
+  }
+  return out.length > limit ? out.slice(0, limit) : out;
 }

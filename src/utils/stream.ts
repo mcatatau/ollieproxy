@@ -6,57 +6,124 @@ interface ParseResult {
   reasoning: string;
 }
 
+/**
+ * Parses all `[[think]]...[[/think]]` blocks in `s`, extracting their inner
+ * text into `reasoning` and removing them from `content`. Unclosed open
+ * markers funnel everything after them into `reasoning`. Multiple blocks are
+ * handled in order.
+ */
 function parseThinking(s: string): ParseResult {
-  const openMatch = s.match(THINK_OPEN);
-  if (!openMatch) {
-    return { content: s, reasoning: '' };
+  let content = '';
+  let reasoning = '';
+  let i = 0;
+
+  while (i < s.length) {
+    const rest = s.slice(i);
+    const openMatch = rest.match(THINK_OPEN);
+    if (!openMatch || openMatch.index === undefined) {
+      content += rest;
+      break;
+    }
+
+    content += rest.slice(0, openMatch.index);
+    const afterOpen = rest.slice(openMatch.index + openMatch[0].length);
+    const closeMatch = afterOpen.match(THINK_CLOSE);
+
+    if (!closeMatch || closeMatch.index === undefined) {
+      reasoning += afterOpen;
+      i = s.length;
+      break;
+    }
+
+    reasoning += afterOpen.slice(0, closeMatch.index);
+    i += openMatch.index + openMatch[0].length + closeMatch.index + closeMatch[0].length;
   }
 
-  const afterOpen = s.slice(openMatch.index! + openMatch[0].length);
-  const closeMatch = afterOpen.match(THINK_CLOSE);
-
-  if (!closeMatch) {
-    return {
-      content: s.slice(0, openMatch.index!),
-      reasoning: afterOpen,
-    };
-  }
-
-  return {
-    content:
-      s.slice(0, openMatch.index!) +
-      afterOpen.slice(closeMatch.index! + closeMatch[0].length),
-    reasoning: afterOpen.slice(0, closeMatch.index!),
-  };
+  return { content, reasoning };
 }
 
+/**
+ * Stateful, incremental parser for `[[think]]...[[/think]]` blocks emitted
+ * inline within streamed `content`.
+ *
+ * Unlike a re-parse of the whole accumulated text on every chunk, this keeps a
+ * small `pending` buffer of bytes not yet classifiable (because they could be
+ * the start of a marker split across chunks) and only inspects newly arrived
+ * data plus that buffer. This is O(n) overall and, unlike the previous
+ * prefix-diff approach, never drops text when a marker completes mid-stream.
+ */
 export class ThinkParser {
-  private fullText = '';
-  private prevContent = '';
-  private prevReasoning = '';
-
-  push(chunk: string): { content: string; reasoning: string } {
-    this.fullText += chunk;
-    const { content, reasoning } = parseThinking(this.fullText);
-
-    const newContent = content.startsWith(this.prevContent)
-      ? content.slice(this.prevContent.length)
-      : '';
-    const newReasoning = reasoning.startsWith(this.prevReasoning)
-      ? reasoning.slice(this.prevReasoning.length)
-      : '';
-
-    this.prevContent = content;
-    this.prevReasoning = reasoning;
-
-    return { content: newContent, reasoning: newReasoning };
-  }
+  // 0 = Outside a think block, 1 = Inside a think block.
+  private state = 0;
+  private pending = '';
 
   reset() {
-    this.fullText = '';
-    this.prevContent = '';
-    this.prevReasoning = '';
+    this.state = 0;
+    this.pending = '';
   }
+
+  push(chunk: string): ParseResult {
+    let buf = this.pending + chunk;
+    this.pending = '';
+    let content = '';
+    let reasoning = '';
+
+    while (buf.length > 0) {
+      const re = this.state === 1 ? THINK_CLOSE : THINK_OPEN;
+      const m = buf.match(re);
+
+      if (m && m.index !== undefined && m.index >= 0) {
+        // A full marker exists within `buf`. Everything before it is finalized
+        // to the current stream; the marker itself toggles state.
+        const before = buf.slice(0, m.index);
+        if (this.state === 1) reasoning += before;
+        else content += before;
+        this.state = this.state === 1 ? 0 : 1;
+        buf = buf.slice(m.index + m[0].length);
+        continue;
+      }
+
+      // No full marker. Hold back a tail that could be the start of a marker
+      // prefix so a split marker can complete on the next chunk. The remainder
+      // is safe to flush to the current stream now.
+      const held = holdMarkerPrefix(buf);
+      if (held.length > 0) {
+        const safe = buf.slice(0, buf.length - held.length);
+        if (this.state === 1) reasoning += safe;
+        else content += safe;
+        this.pending = held;
+      } else {
+        if (this.state === 1) reasoning += buf;
+        else content += buf;
+      }
+      break;
+    }
+
+    return { content, reasoning };
+  }
+}
+
+/** Full literal marker texts, used to detect markers split across chunks. */
+const MARKER_TEXTS = ['[[think]]', '[[/think]]'];
+
+/**
+ * Returns the longest suffix of `s` that is also a prefix of any think marker.
+ * When a marker is split across chunks this tail is held back until it can be
+ * resolved by the next chunk.
+ */
+function holdMarkerPrefix(s: string): string {
+  let best = '';
+  for (const marker of MARKER_TEXTS) {
+    const maxLen = Math.min(s.length, marker.length - 1);
+    for (let len = maxLen; len > best.length; len--) {
+      const tail = s.slice(s.length - len);
+      if (marker.startsWith(tail)) {
+        if (len > best.length) best = tail;
+        break;
+      }
+    }
+  }
+  return best;
 }
 
 interface UpstreamDelta {
