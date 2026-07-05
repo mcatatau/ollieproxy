@@ -181,6 +181,8 @@ O proxy pode exigir uma API key em todos os endpoints `/v1/*` (`/health` e `/v1/
 
 ### Criar / listar / revogar chaves (CLI)
 
+> Os scripts `key:*` rodam o CLI compilado em `dist/`, então rode `npm run build` antes de usá-los pela primeira vez ou após mudanças no código.
+
 ```bash
 # Cria uma chave com label e RPM próprio; imprime o plaintext UMA vez
 npm run key:create -- --label=acme-client --rpm=30

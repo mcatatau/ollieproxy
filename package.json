@@ -8,9 +8,9 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
-    "key:create": "tsx src/keys/cli.ts create",
-    "key:list": "tsx src/keys/cli.ts list",
-    "key:revoke": "tsx src/keys/cli.ts revoke"
+    "key:create": "node dist/keys/cli.js create",
+    "key:list": "node dist/keys/cli.js list",
+    "key:revoke": "node dist/keys/cli.js revoke"
   },
   "dependencies": {
     "@fastify/cors": "^11.0.1",
