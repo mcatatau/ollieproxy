@@ -194,7 +194,14 @@ npm run key:list
 npm run key:revoke -- <id>
 ```
 
-Em produção (imagem Docker), rode o CLI dentro do container apontando para o volume de dados:
+Em produção, rode o CLI dentro do container apontando para o diretório de dados. No Railway, anexe um **Volume** ao path `/app/data` e rode:
+
+```bash
+# Railway: execute um command efêmero no serviço
+node dist/keys/cli.js create --label=ci --rpm=60
+```
+
+Em Docker local, monte um volume em `/app/data`:
 
 ```bash
 docker run --rm -v ollieproxy-data:/app/data ollieproxy node dist/keys/cli.js create --label=ci --rpm=60

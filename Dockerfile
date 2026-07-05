@@ -38,10 +38,10 @@ ENV NODE_ENV=production \
 
 EXPOSE 3000
 
-# Persistent store for API keys (used when AUTH_ENABLED=1). Mount a volume here
-# so keys survive restarts, e.g. -v ollieproxy-data:/app/data
-VOLUME ["/app/data"]
-
 # Node handles SIGINT/SIGTERM directly (the app has graceful shutdown), and
 # Docker's `--init` can be used if zombie reaping is ever needed.
+#
+# Persistent store for API keys lives in /app/data (used when AUTH_ENABLED=1).
+# On Railway, attach a Volume to /app/data so keys survive redeploys; do not use
+# a Dockerfile `VOLUME` directive (Railway does not support it).
 CMD ["node", "dist/index.js"]
