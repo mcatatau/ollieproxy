@@ -21,7 +21,8 @@ FROM node:22-alpine AS runtime
 WORKDIR /app
 
 # Run as a non-root user for defense in depth.
-RUN addgroup -S app && adduser -S app -G app
+RUN addgroup -S app && adduser -S app -G app \
+    && mkdir -p /app/data && chown -R app:app /app/data
 
 # Copy the production deps and compiled output from the build stage.
 COPY --from=build --chown=app:app /app/node_modules ./node_modules
@@ -36,6 +37,10 @@ ENV NODE_ENV=production \
     REDACT_PII=1
 
 EXPOSE 3000
+
+# Persistent store for API keys (used when AUTH_ENABLED=1). Mount a volume here
+# so keys survive restarts, e.g. -v ollieproxy-data:/app/data
+VOLUME ["/app/data"]
 
 # Node handles SIGINT/SIGTERM directly (the app has graceful shutdown), and
 # Docker's `--init` can be used if zombie reaping is ever needed.

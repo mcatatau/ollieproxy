@@ -15,6 +15,11 @@ async function main() {
     } else {
       app.log.info('PII redaction off');
     }
+    if (config.auth.enabled) {
+      app.log.info(`Auth ON (keys: ${config.auth.keysFile}, default RPM: ${config.auth.defaultRpm})`);
+    } else {
+      app.log.info('Auth off (set AUTH_ENABLED=1 after creating keys)');
+    }
     app.log.info(`Models: GET  http://localhost:${config.port}/v1/models`);
     app.log.info(`Chat:   POST http://localhost:${config.port}/v1/chat/completions`);
   } catch (err) {

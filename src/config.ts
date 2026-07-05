@@ -85,4 +85,17 @@ export const config = {
     enabled: redactEnabled && redactCategories.length > 0,
     categories: redactCategories,
   },
+  /**
+   * API-key authentication + per-key rate limiting.
+   *
+   * `AUTH_ENABLED` is OFF by default so the proxy stays open until the operator
+   * creates keys via the CLI and flips it on. Keys are stored hashed in
+   * `KEYS_FILE` (default `./data/keys.json`). `DEFAULT_RPM` is the per-minute
+   * request cap applied to any key that doesn't override it.
+   */
+  auth: {
+    enabled: boolEnv('AUTH_ENABLED', false),
+    keysFile: process.env.KEYS_FILE || './data/keys.json',
+    defaultRpm: intEnv('DEFAULT_RPM', 60),
+  },
 } as const;

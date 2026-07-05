@@ -73,6 +73,9 @@ Todas as configurações são via variáveis de ambiente:
 | `BODY_LIMIT_BYTES` | `4194304` | Limite de corpo da requisição (bytes) |
 | `REDACT_PII` | `1` | Ativa a redação reversível de PII (`1`/`true`/`on` para ligar, `0`/`false`/`off` para desligar). Ativa por padrão |
 | `REDACT_CATEGORIES` | *(padrão)* | Lista CSV de categorias quando `REDACT_PII=1`, ou `all` para todas. Default = sensíveis + baixo falso-positivo; `all` adiciona as opt-in de FP mais alto |
+| `AUTH_ENABLED` | `0` | Exige API key em `/v1/*` (`/health` continua liberado). OFF por padrão — crie chaves antes de ligar |
+| `KEYS_FILE` | `./data/keys.json` | Arquivo onde as chaves (hasheadas) são guardadas |
+| `DEFAULT_RPM` | `60` | Limite padrão de requisições por minuto por chave. Cada chave pode sobrescrever via `--rpm` |
 
 ## Endpoints
 
@@ -172,6 +175,45 @@ REDACT_PII=1 REDACT_CATEGORIES=email,phone,dburl,jwt npm start
 REDACT_PII=0 npm start
 ```
 
+## API keys e rate limit
+
+O proxy pode exigir uma API key em todos os endpoints `/v1/*` (`/health` e `/v1/health` ficam liberados para probes). As chaves são guardadas apenas como hash SHA-256 num arquivo JSON, e cada chave tem seu próprio limite de requisições por minuto (RPM).
+
+### Criar / listar / revogar chaves (CLI)
+
+```bash
+# Cria uma chave com label e RPM próprio; imprime o plaintext UMA vez
+npm run key:create -- --label=acme-client --rpm=30
+# Com expiração (sufixo d/h/m)
+npm run key:create -- --label=temp --rpm=100 --expires-in=7d
+
+# Lista todas (id, status, rpm, expiração, label)
+npm run key:list
+
+# Revoga pelo id (efeito imediato, sem restart)
+npm run key:revoke -- <id>
+```
+
+Em produção (imagem Docker), rode o CLI dentro do container apontando para o volume de dados:
+
+```bash
+docker run --rm -v ollieproxy-data:/app/data ollieproxy node dist/keys/cli.js create --label=ci --rpm=60
+```
+
+### Ativar a exigência de key
+
+```bash
+AUTH_ENABLED=1 DEFAULT_RPM=60 npm start
+```
+
+Clientes enviam a key no header `Authorization: Bearer op_…`. Sem key → `401`; acima do RPM → `429` com `Retry-After` e headers `X-RateLimit-Limit` / `X-RateLimit-Remaining` / `X-RateLimit-Reset`.
+
+### Detalhes
+
+- As chaves são armazenadas somente como hash, então um `keys.json` vazado não expõe credenciais usáveis. O plaintext é mostrado apenas no momento da criação.
+- A revogação/criação de chaves via CLI surte efeito sem reiniciar o serviço: o proxy recarrega o arquivo quando seu mtime muda.
+- O rate limit é por chave, em janela fixa de 60s, em memória (reseta no restart). Para anti-abuso isso é suficiente: nenhum atacante excede `rpm` de forma sustentada.
+
 ## Níveis de Thinking
 
 Os níveis de raciocínio podem ser definidos de duas formas (com precedência para `reasoning_effort` explícito):
@@ -206,7 +248,7 @@ Os modelos base disponíveis (cada um exposto também com sufixos `-low`, `-medi
 ```
 src/
   index.ts        # Entry point + graceful shutdown
-  server.ts       # Instância Fastify, CORS, rotas, health checks
+  server.ts       # Instância Fastify, CORS, rotas, health checks, auth
   config.ts       # Configuração via env
   schemas.ts      # Validação Zod das requisições
   routes/
@@ -216,6 +258,12 @@ src/
     model.ts      # Parse de sufixo de thinking + mapeamento upstream
     stream.ts     # ThinkParser incremental + StreamTransformer (+ restauração PII)
     redact.ts     # Layer 1: Redactor/Restorer + padrões e validadores (CPF/CNPJ/Luhn)
+  keys/
+    store.ts      # JSON store de API keys (hash SHA-256, write atômico)
+    auth.ts       # Verificação de bearer + reload por mtime
+    ratelimit.ts  # Rate limiter in-memory por chave (janela fixa de RPM)
+    plugin.ts     # Hook preHandler: auth + rate limit no Fastify
+    cli.ts        # CLI key:create / key:list / key:revoke
 ```
 
 ## Scripts

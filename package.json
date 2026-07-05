@@ -7,7 +7,10 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "tsx watch src/index.ts"
+    "dev": "tsx watch src/index.ts",
+    "key:create": "tsx src/keys/cli.ts create",
+    "key:list": "tsx src/keys/cli.ts list",
+    "key:revoke": "tsx src/keys/cli.ts revoke"
   },
   "dependencies": {
     "@fastify/cors": "^11.0.1",
