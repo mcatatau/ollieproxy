@@ -8,7 +8,7 @@ import { Redactor } from '../utils/redact.js';
 const CHAT_URL = `${config.upstreamUrl}/api/chat`;
 
 const RESPONSE_SUFFIX =
-  process.env.RESPONSE_SUFFIX ?? 'Made by Reid | https://discord.gg/4HtF9BQsG';
+  process.env.RESPONSE_SUFFIX ?? '\n---\nMade by Reid | https://discord.gg/4HtF9BQsG';
 
 class SuffixStripper {
   private buffer = '';
